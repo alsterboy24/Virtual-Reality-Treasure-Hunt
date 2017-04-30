@@ -1,0 +1,381 @@
+import android.opengl.GLES20;
+import android.opengl.Matrix;
+import android.os.Bundle;
+import android.util.Log;
+import com.google.vr.sdk.base.AndroidCompat;
+import com.google.vr.sdk.base.Eye;
+import com.google.vr.sdk.base.GvrActivity;
+import com.google.vr.sdk.base.GvrView;
+import com.google.vr.sdk.base.HeadTransform;
+import com.google.vr.sdk.base.Viewport;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import javax.microedition.khronos.egl.EGLConfig;
+
+public class VRTHunterActivity extends GvrActivity
+{
+
+  protected float[] modelTreasureItem;
+  protected float[] modelPosition;
+  private static final String TAG = "VRTHunterActivity";
+  private static final float Z_NEAR = 0.1f;
+  private static final float Z_FAR = 100.0f;
+  private static final float CAMERA_Z = 0.01f;
+  private static final float TIME_DELTA = 0.3f;
+  private static final float YAW_LIMIT = 0.12f;
+  private static final float PITCH_LIMIT = 0.12f;
+  private static final int COORDINATES_PER_VERTEX = 3;
+  private static final float[] LIGHT_POSITION_IN_VR_SPACE = new float[] {0.0f, 2.0f, 0.0f, 1.0f};
+  private static final float[] POSITION_MATRIX_MULTIPLY_VEC = {0, 0, 0, 1.0f};
+  private static final float MINIMUM_MODEL_DISTANCE = 3.0f;
+  private static final float MAXIMUM_MODEL_DISTANCE = 7.0f;
+  private final float[] lightPositionInEyeSpace = new float[4];
+  private FloatBuffer vrSpaceVertices;
+  private FloatBuffer vrSpaceColours;
+  private FloatBuffer vrSpaceNormals;
+  private FloatBuffer treasureItemVertices;
+  private FloatBuffer treasureItemColours;
+  private FloatBuffer treasureItemFoundColours;
+  private FloatBuffer treasureItemNormals;
+  private int treasureItemProgram;
+  private int vrSpaceProgram;
+
+  private int treasureItemPositionParameter;
+  private int treasureItemNormalParameter;
+  private int treasureItemColourParameter;
+  private int treasureItemModelParameter;
+  private int treasureItemViewParameter;
+  private int treasureItemVPParameter;
+  private int treasureItemLPParameter;
+  private int vrSpacePositionParameter;
+  private int vrSpaceNormalParameter;
+  private int vrSpaceColourParameter;
+  private int vrSpaceModelParameter;
+  private int vrSpaceModelViewParameter;
+  private int vrSpaceModelVPParameter;
+  private int vrSpaceLPParameter;
+
+  private float[] camera;
+  private float[] view;
+  private float[] headView;
+  private float[] modelViewProjection;
+  private float[] modelView;
+  private float[] modelVRSpace;
+
+  private float[] tempPosition;
+  private float objectDistance = MAXIMUM_MODEL_DISTANCE / 2.0f;
+  private float floorDepth = 20f;
+
+  private int bootGLShader(int type, int resId)
+  {
+    String code = scanRTF(resId);
+    int shader = GLES20.glCreateShader(type);
+    GLES20.glShaderSource(shader, code);
+    GLES20.glCompileShader(shader);
+
+    final int[] compileStatus = new int[1];
+    GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compileStatus, 0);
+
+    if (compileStatus[0] == 0)
+    {
+      Log.e(TAG, "Shading couldn't be compiled: " + GLES20.glGetShaderInfoLog(shader));
+      GLES20.glDeleteShader(shader);
+      shader = 0;
+    }
+
+    if (shader == 0)
+    {
+      throw new RuntimeException("Shader cannot be created.");
+    }
+
+    return shader;
+  }
+
+  private static void confirmGLBug(String label)
+  {
+    int error;
+    while ((error = GLES20.glGetError()) != GLES20.GL_NO_ERROR)
+    {
+      Log.e(TAG, label + ": glError " + error);
+      throw new RuntimeException(label + ": glError " + error);
+    }
+  }
+
+  @Override
+  public void onCreate(Bundle savedInstanceState)
+  {
+    super.onCreate(savedInstanceState);
+
+    initializeGvrView();
+
+    modelTreasureItem = new float[16];
+    camera = new float[16];
+    view = new float[16];
+    modelViewProjection = new float[16];
+    modelView = new float[16];
+    modelVRSpace = new float[16];
+    tempPosition = new float[4];
+    modelPosition = new float[] {0.0f, 0.0f, -MAXIMUM_MODEL_DISTANCE / 2.0f};
+    headView = new float[16];
+  }
+
+  public void initializeGvrView()
+  {
+    setContentView(R.layout.common_ui);
+    GvrView gvrView = (GvrView) findViewById(R.id.gvr_view);
+    gvrView.setEGLConfigChooser(8, 8, 8, 8, 16, 8);
+    gvrView.setTransitionViewEnabled(true);
+    if (gvrView.setAsyncReprojectionEnabled(true))
+    {
+      AndroidCompat.setSustainedPerformanceMode(this, true);
+    }
+
+    setGvrView(gvrView);
+  }
+
+  @Override
+  public void onVRSpaceCreated(EGLConfig config)
+  {
+    Log.i(TAG, "onVRSpaceCreated");
+    GLES20.glClearColor(0.1f, 0.1f, 0.1f, 0.5f);
+
+    ByteBuffer bbVertices = ByteBuffer.allocateDirect(VRSpace.TREASURE_ITEM_COORDINATES.length * 4);
+    bbVertices.order(ByteOrder.nativeOrder());
+    treasureItemVertices = bbVertices.asFloatBuffer();
+    treasureItemVertices.put(VRSpace.TREASURE_ITEM_COORDINATES);
+    treasureItemVertices.position(0);
+
+    ByteBuffer bbColors = ByteBuffer.allocateDirect(VRSpace.TREASURE_ITEM_COLOURS.length * 4);
+    bbColors.order(ByteOrder.nativeOrder());
+    treasureItemColours = bbColors.asFloatBuffer();
+    treasureItemColours.put(VRSpace.TREASURE_ITEM_COLOURS);
+    treasureItemColours.position(0);
+
+    ByteBuffer bbFoundColors =
+        ByteBuffer.allocateDirect(VRSpace.TREASURE_ITEM_HUNTED_COLOURS.length * 4);
+    bbFoundColors.order(ByteOrder.nativeOrder());
+    treasureItemFoundColours = bbFoundColors.asFloatBuffer();
+    treasureItemFoundColours.put(VRSpace.TREASURE_ITEM_HUNTED_COLOURS);
+    treasureItemFoundColours.position(0);
+
+    ByteBuffer bbNormals = ByteBuffer.allocateDirect(VRSpace.TREASURE_ITEM_NORMALS.length * 4);
+    bbNormals.order(ByteOrder.nativeOrder());
+    treasureItemNormals = bbNormals.asFloatBuffer();
+    treasureItemNormals.put(VRSpace.TREASURE_ITEM_NORMALS);
+    treasureItemNormals.position(0);
+
+    ByteBuffer bbFloorVertices = ByteBuffer.allocateDirect(VRSpace.VRSPACE_COORDINATES.length * 4);
+    bbFloorVertices.order(ByteOrder.nativeOrder());
+    vrSpaceVertices = bbFloorVertices.asFloatBuffer();
+    vrSpaceVertices.put(VRSpace.VRSPACE_COORDINATES);
+    vrSpaceVertices.position(0);
+
+    ByteBuffer bbFloorNormals = ByteBuffer.allocateDirect(VRSpace.VRSPACE_NORMALS.length * 4);
+    bbFloorNormals.order(ByteOrder.nativeOrder());
+    vrSpaceNormals = bbFloorNormals.asFloatBuffer();
+    vrSpaceNormals.put(VRSpace.VRSPACE_NORMALS);
+    vrSpaceNormals.position(0);
+
+    ByteBuffer bbFloorColors = ByteBuffer.allocateDirect(VRSpace.VRSPACE_COLOURS.length * 4);
+    bbFloorColors.order(ByteOrder.nativeOrder());
+    vrSpaceColours = bbFloorColors.asFloatBuffer();
+    vrSpaceColours.put(VRSpace.VRSPACE_COLOURS);
+    vrSpaceColours.position(0);
+
+    int vertexShader = bootGLShader(GLES20.GL_VERTEX_SHADER, R.raw.light_vertex);
+    int gridShader = bootGLShader(GLES20.GL_FRAGMENT_SHADER, R.raw.grid_fragment);
+    int passthroughShader = bootGLShader(GLES20.GL_FRAGMENT_SHADER, R.raw.passthrough_fragment);
+
+    treasureItemProgram = GLES20.glCreateProgram();
+    GLES20.glAttachShader(treasureItemProgram, vertexShader);
+    GLES20.glAttachShader(treasureItemProgram, passthroughShader);
+    GLES20.glLinkProgram(treasureItemProgram);
+    GLES20.glUseProgram(treasureItemProgram);
+
+    confirmGLBug("Treasure item program");
+
+    treasureItemPositionParameter = GLES20.glGetAttribLocation(treasureItemProgram, "a_Position");
+    treasureItemNormalParameter = GLES20.glGetAttribLocation(treasureItemProgram, "a_Normal");
+    treasureItemColourParameter = GLES20.glGetAttribLocation(treasureItemProgram, "a_Colour");
+
+    treasureItemModelParameter = GLES20.glGetUniformLocation(treasureItemProgram, "u_Model");
+    treasureItemViewParameter = GLES20.glGetUniformLocation(treasureItemProgram, "u_MVMatrix");
+    treasureItemVPParameter = GLES20.glGetUniformLocation(treasureItemProgram, "u_MVP");
+    treasureItemLPParameter = GLES20.glGetUniformLocation(treasureItemProgram, "u_LightPosition");
+
+    confirmGLBug("Treasure item program parameters");
+
+    vrSpaceProgram = GLES20.glCreateProgram();
+    GLES20.glAttachShader(vrSpaceProgram, vertexShader);
+    GLES20.glAttachShader(vrSpaceProgram, gridShader);
+    GLES20.glLinkProgram(vrSpaceProgram);
+    GLES20.glUseProgram(vrSpaceProgram);
+
+    confirmGLBug("VR space program");
+
+    vrSpaceModelParameter = GLES20.glGetUniformLocation(vrSpaceProgram, "u_Model");
+    vrSpaceModelViewParameter = GLES20.glGetUniformLocation(vrSpaceProgram, "u_MVMatrix");
+    vrSpaceModelVPParameter = GLES20.glGetUniformLocation(vrSpaceProgram, "u_MVP");
+    vrSpaceLPParameter = GLES20.glGetUniformLocation(vrSpaceProgram, "u_LightPosition");
+    vrSpacePositionParameter = GLES20.glGetAttribLocation(vrSpaceProgram, "a_Position");
+    vrSpaceNormalParameter = GLES20.glGetAttribLocation(vrSpaceProgram, "a_Normal");
+    vrSpaceColourParameter = GLES20.glGetAttribLocation(vrSpaceProgram, "a_Colour");
+
+    confirmGLBug("VR space program parameters");
+    Matrix.setIdentityM(modelVRSpace, 0);
+    Matrix.translateM(modelVRSpace, 0, 0, -floorDepth, 0);
+    refreshModelPoint();
+
+    confirmGLBug("onVRSpaceCreated");
+  }
+
+  protected void refreshModelPoint()
+  {
+    Matrix.setIdentityM(modelTreasureItem, 0);
+    Matrix.translateM(modelTreasureItem, 0, modelPosition[0], modelPosition[1], modelPosition[2]);
+  }
+
+  private String scanRTF(int resId)
+  {
+    InputStream inputStream = getResources().openRawResource(resId);
+    try
+    {
+      BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+      StringBuilder sb = new StringBuilder();
+      String line;
+      while ((line = reader.readLine()) != null)
+      {
+        sb.append(line).append("\n");
+      }
+      reader.close();
+      return sb.toString();
+    } catch (IOException e)
+    {
+      e.printStackTrace();
+    }
+    return null;
+  }
+
+  @Override
+  public void newFrame(HeadTransform headTransform)
+  {
+    quadrantRevolution();
+    Matrix.setLookAtM(camera, 0, 0.0f, 0.0f, CAMERA_Z, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f);
+    headTransform.getHeadView(headView, 0);
+    confirmGLBug("onConfirmCreate");
+  }
+
+  protected void quadrantRevolution()
+  {
+    Matrix.rotateM(modelTreasureItem, 0, TIME_DELTA, 0.5f, 0.5f, 1.0f);
+  }
+
+  @Override
+  public void createEyeView(Eye eye)
+  {
+    GLES20.glEnable(GLES20.GL_DEPTH_TEST);
+    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT | GLES20.GL_DEPTH_BUFFER_BIT);
+
+    confirmGLBug("colourParameters");
+    Matrix.multiplyMM(view, 0, eye.getEyeView(), 0, camera, 0);
+    Matrix.multiplyMV(lightPositionInEyeSpace, 0, view, 0, LIGHT_POSITION_IN_VR_SPACE, 0);
+
+    float[] perspective = eye.getPerspective(Z_NEAR, Z_FAR);
+    Matrix.multiplyMM(modelView, 0, view, 0, modelTreasureItem, 0);
+    Matrix.multiplyMM(modelViewProjection, 0, perspective, 0, modelView, 0);
+    createTreasureCube();
+
+    Matrix.multiplyMM(modelView, 0, view, 0, modelVRSpace, 0);
+    Matrix.multiplyMM(modelViewProjection, 0, perspective, 0, modelView, 0);
+    createFloorSpace();
+  }
+
+  @Override
+  public void completeFrame(Viewport viewport) {}
+  public void createTreasureCube()
+  {
+    GLES20.glUseProgram(treasureItemProgram);
+    GLES20.glUniform3fv(treasureItemLPParameter, 1, lightPositionInEyeSpace, 0);
+    GLES20.glUniformMatrix4fv(treasureItemModelParameter, 1, false, modelTreasureItem, 0);
+    GLES20.glUniformMatrix4fv(treasureItemViewParameter, 1, false, modelView, 0);
+    GLES20.glVertexAttribPointer(treasureItemPositionParameter, COORDINATES_PER_VERTEX, GLES20.GL_FLOAT, false, 0, treasureItemVertices);
+    GLES20.glUniformMatrix4fv(treasureItemVPParameter, 1, false, modelViewProjection, 0);
+    GLES20.glVertexAttribPointer(treasureItemNormalParameter, 3, GLES20.GL_FLOAT, false, 0, treasureItemNormals);
+    GLES20.glVertexAttribPointer(treasureItemColourParameter, 4, GLES20.GL_FLOAT, false, 0, userLookingAtObject() ? treasureItemFoundColours : treasureItemColours);
+    GLES20.glEnableVertexAttribArray(treasureItemPositionParameter);
+    GLES20.glEnableVertexAttribArray(treasureItemNormalParameter);
+    GLES20.glEnableVertexAttribArray(treasureItemColourParameter);
+    GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36);
+    GLES20.glDisableVertexAttribArray(treasureItemPositionParameter);
+    GLES20.glDisableVertexAttribArray(treasureItemNormalParameter);
+    GLES20.glDisableVertexAttribArray(treasureItemColourParameter);
+    
+    confirmGLBug("Create treasure cube");
+  }
+
+  public void createFloorSpace()
+  {
+    GLES20.glUseProgram(vrSpaceProgram);
+
+    GLES20.glUniform3fv(vrSpaceLPParameter, 1, lightPositionInEyeSpace, 0);
+    GLES20.glUniformMatrix4fv(vrSpaceModelParameter, 1, false, modelVRSpace, 0);
+    GLES20.glUniformMatrix4fv(vrSpaceModelViewParameter, 1, false, modelView, 0);
+    GLES20.glUniformMatrix4fv(vrSpaceModelVPParameter, 1, false, modelViewProjection, 0);
+    GLES20.glVertexAttribPointer(
+        vrSpacePositionParameter, COORDINATES_PER_VERTEX, GLES20.GL_FLOAT, false, 0, vrSpaceVertices);
+    GLES20.glVertexAttribPointer(vrSpaceNormalParameter, 3, GLES20.GL_FLOAT, false, 0, vrSpaceNormals);
+    GLES20.glVertexAttribPointer(vrSpaceColourParameter, 4, GLES20.GL_FLOAT, false, 0, vrSpaceColours);
+
+    GLES20.glEnableVertexAttribArray(vrSpacePositionParameter);
+    GLES20.glEnableVertexAttribArray(vrSpaceNormalParameter);
+    GLES20.glEnableVertexAttribArray(vrSpaceColourParameter);
+
+    GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 24);
+
+    GLES20.glDisableVertexAttribArray(vrSpacePositionParameter);
+    GLES20.glDisableVertexAttribArray(vrSpaceNormalParameter);
+    GLES20.glDisableVertexAttribArray(vrSpaceColourParameter);
+
+    confirmGLBug("Create floor space");
+  }
+
+  protected void disappearObject()
+  {
+    float[] rotationMatrix = new float[16];
+    float[] posVec = new float[4];
+    float angleXZ = (float) Math.random() * 180 + 90;
+    Matrix.setRotateM(rotationMatrix, 0, angleXZ, 0f, 1f, 0f);
+    float oldObjectDistance = objectDistance;
+    objectDistance =
+        (float) Math.random() * (MAXIMUM_MODEL_DISTANCE - MINIMUM_MODEL_DISTANCE) + MINIMUM_MODEL_DISTANCE;
+    float objectScalingFactor = objectDistance / oldObjectDistance;
+    Matrix.scaleM(rotationMatrix, 0, objectScalingFactor, objectScalingFactor, objectScalingFactor);
+    Matrix.multiplyMV(posVec, 0, rotationMatrix, 0, modelTreasureItem, 12);
+
+    float angleY = (float) Math.random() * 80 - 40;
+    angleY = (float) Math.toRadians(angleY);
+    float newY = (float) Math.tan(angleY) * objectDistance;
+
+    modelPosition[0] = posVec[0];
+    modelPosition[1] = newY;
+    modelPosition[2] = posVec[2];
+
+    refreshModelPoint();
+  }
+
+  private boolean userLookingAtObject()
+  {
+    Matrix.multiplyMM(modelView, 0, headView, 0, modelTreasureItem, 0);
+    Matrix.multiplyMV(tempPosition, 0, modelView, 0, POSITION_MATRIX_MULTIPLY_VEC, 0);
+
+    float pitch = (float) Math.atan2(tempPosition[1], -tempPosition[2]);
+    float yaw = (float) Math.atan2(tempPosition[0], -tempPosition[2]);
+
+    return Math.abs(pitch) < PITCH_LIMIT && Math.abs(yaw) < YAW_LIMIT;
+  }
+}
