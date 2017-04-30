@@ -315,10 +315,10 @@ public class VRTHunterActivity extends GvrActivity
     GLES20.glDisableVertexAttribArray(treasureItemNormalParameter);
     GLES20.glDisableVertexAttribArray(treasureItemColourParameter);
     
-    confirmGLBug("Create treasure cube");
+    confirmGLBug("Create treasure item");
   }
 
-  public void createFloorSpace()
+  public void createVRSpace()
   {
     GLES20.glUseProgram(vrSpaceProgram);
 
@@ -341,7 +341,7 @@ public class VRTHunterActivity extends GvrActivity
     GLES20.glDisableVertexAttribArray(vrSpaceNormalParameter);
     GLES20.glDisableVertexAttribArray(vrSpaceColourParameter);
 
-    confirmGLBug("Create floor space");
+    confirmGLBug("Create vr space");
   }
 
   protected void disappearObject()
